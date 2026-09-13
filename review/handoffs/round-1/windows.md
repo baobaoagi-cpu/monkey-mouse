@@ -1,5 +1,33 @@
 # Round 1 / ASUS
 
+## 2026-09-13 SDK 準備更新（目前狀態）
+
+- 狀態仍為 **BLOCKED**，但 Windows SDK 缺項已解除。以下更新優先於後文保留的首次盤點；沒有進入第二輪。
+- 已讀 Mac 報告 SHA：`4338610592b2779d71a64a492c68351858fe8933`；已讀整合 decision SHA：`4c55a644c4c9a45eeb47523da135ce84d1f76bba`。Mac 已確認內建與 BenQ 雙屏在線，舊的「BenQ 未接」不再列為現況。本端依 Git 報告確認，沒有遠端重測 Mac。
+- 本次更新的父提交：`cec7d323d80ccbaa20173ba5ad73bcc530769577`；程式基準仍是 `6958594d61217aa47a61fe11649e3570283180fb`，產品程式未變更。本更新提交 SHA 由 Mac decision 引用。
+- 使用者於 2026-09-13 在本機對「下載官方 .NET SDK 10.0.401 x64、驗證 SHA-512、隔離解壓與版本核對」明確回覆批准；不涵蓋其他工具安裝、restore/build/test、native store 或 listener。
+
+| Case | 主機／時間 | 命令或步驟 | 實際結果 | 狀態 | 本地證據 |
+| --- | --- | --- | --- | --- | --- |
+| R1-W12 | ASUS；2026-09-13 14:40–14:41 +08:00 | git status、git check-ignore、Get-PSDrive、Test-Path；讀官方 metadata | 起始工作樹乾淨、目標目錄及ZIP不存在、磁碟空間足夠；工具目錄受ignore保護；官方版本與預期hash一致 | PASS | 本機前置查詢；未公開個人路徑 |
+| R1-W13 | ASUS；2026-09-13T14:40:22+08:00 | Invoke-WebRequest 官方ZIP；Get-FileHash -Algorithm SHA512 | 300608304 bytes；實檔SHA-512與官方metadata及Mac批准卡一致，通過後才解壓 | PASS | local-only/round-1-sdk-download.json |
+| R1-W14 | ASUS；2026-09-13T14:41:10+08:00 | Expand-Archive 至隔離目錄；明確路徑 dotnet.exe --list-sdks／--list-runtimes | SDK 10.0.401；NETCore／AspNetCore／WindowsDesktop Runtime 10.0.12 | PASS | local-only/round-1-sdk-validation.json |
+| R1-W15 | ASUS；2026-09-13T14:41:10+08:00 | Get-AuthenticodeSignature 隔離dotnet.exe；系統dotnet --list-sdks；git check-ignore | dotnet.exe 簽章 Valid；系統原有dotnet仍無SDK；下載檔、解壓目錄與證據未納入Git | PASS | 同上；僅驗證dotnet.exe簽章，不宣稱逐檔簽章審計 |
+
+官方來源：
+
+- https://builds.dotnet.microsoft.com/dotnet/release-metadata/10.0/releases.json
+- https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.401/dotnet-sdk-10.0.401-win-x64.zip
+- 已驗證實檔 SHA-512：`24b670ad3d923bfcf47df6c3b034152398b42f6dbc388e10d783aee1cfb5e5817d399fc0ae2a12cfa822a55e61d34830ccb15c50ef6efee437ab874bb7c79430`（公開官方套件摘要，不是裝置指紋）。
+
+新增的一般本機檔案只在 `local-only/tools/` 與 `local-only/round-1-sdk-*.json`。SDK 目錄為 `local-only/tools/dotnet-10.0.401/`；未覆蓋既有目錄。僅在版本查詢程序設定 CLI telemetry／首次體驗／開發憑證產生抑制變數及本地 CLI_HOME，不改全域PATH，不更動系統.NET，不需要管理員或重啟。未安裝Python、未restore/build/test、未執行專案CLI、未寫DPAPI／Keychain、未配對、未啟動controller／listener、未改ShareMouse／權限／防火牆。新增目錄保留供後续已授權工作使用，無系統變更需回復。
+
+剩餘阻礙：Python命令尚未準備、Windows顯示角色／DPI空間獨立核對、雙端資料私下對齊與可信LAN确认仍未完成。SDK準備通過不等於Round1通過；Mac decision的STOP仍有效。
+
+給 Mac 的唯一下一步：請讀取本次 Windows 更新的完整提交 SHA，更新同輪 `decision.md`，將 SDK 缺項改為已解除，保留上述其餘阻礙，提出下一個具體準備動作；不要進入第二輪或把本輪記成 PASS。
+
+## 首次盤點紀錄（2026-09-13 13:14；下列缺項以更新節為準）
+
 - 狀態：BLOCKED（工具與雙端資料前置門檻未完成）；作者隱私確認已完成，可發布本報告。
 - 本報告提交 SHA：由整合 decision 引用本報告的完整提交 SHA，避免自引用 SHA 循環。
 - 本輪輸入／計畫 SHA：`97a4fbfdfeb8943ce1d062b27547afce7b8d2490`。
