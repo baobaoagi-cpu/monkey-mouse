@@ -4,15 +4,15 @@ from pathlib import Path
 import json
 import xml.etree.ElementTree as ET
 root = Path(__file__).resolve().parents[1]
-agent = (root / 'Hydra/Platform/MacOs/AgentCommands.cs').read_text()
-updater = (root / 'Hydra/Update/SelfUpdater.cs').read_text()
-program = (root / 'Hydra/Program.cs').read_text()
+agent = (root / 'Hydra/Platform/MacOs/AgentCommands.cs').read_text(encoding="utf-8")
+updater = (root / 'Hydra/Update/SelfUpdater.cs').read_text(encoding="utf-8")
+program = (root / 'Hydra/Program.cs').read_text(encoding="utf-8")
 project = ET.parse(root / 'Hydra/Hydra.csproj').getroot()
 cycle = updater.split('protected override Task Execute(')[1].split('private async Task CheckAndUpdate(')[0]
 commands = [e.attrib['Command'] for e in project.iter('Exec')]
-fragment = json.loads((root / 'review/safe-profile.fragment.json').read_text())
-legacy = (root / 'Hydra/Relay/RelayConnection.cs').read_text()
-secure = (root / 'Hydra/Security/SecureMessagePolicy.cs').read_text()
+fragment = json.loads((root / 'review/safe-profile.fragment.json').read_text(encoding="utf-8"))
+legacy = (root / 'Hydra/Relay/RelayConnection.cs').read_text(encoding="utf-8")
+secure = (root / 'Hydra/Security/SecureMessagePolicy.cs').read_text(encoding="utf-8")
 checks = {
     'legacy_network_loop_removed': 'HubConnectionBuilder' not in legacy and 'new RelayEncryption' not in legacy,
     'legacy_data_rejected': 'Receive(string sourceHost, string sourceIp, byte[] payload) => Task.CompletedTask' in legacy,

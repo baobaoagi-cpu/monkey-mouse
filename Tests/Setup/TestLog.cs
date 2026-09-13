@@ -1,3 +1,4 @@
+// Monkey Mouse, modified 2026-09-13; GPL-2.0. Locate source in clones, worktrees and source archives.
 using Cathedral.Logging;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -24,7 +25,7 @@ public static class TestLog
         var current = new DirectoryInfo(startPath);
         while (current != null)
         {
-            if (current.GetFiles("*.sln").Length > 0 && current.GetDirectories(".git").Length > 0)
+            if (current.GetFiles("*.sln").Length > 0 && current.GetDirectories("Tests").Length > 0)
                 return current.FullName;
             current = current.Parent;
         }

@@ -5,6 +5,7 @@ namespace Tests.Config;
 public class ReviewToolTests
 {
     [TestCase("identity-init")][TestCase("identity-show")][TestCase("invite-export")]
+    [TestCase("socket-smoke")]
     [TestCase("peers")][TestCase("pair")][TestCase("revoke")][TestCase("storage-self-test")]
     public async Task ProtectedStorageCommand_RefusesWithoutExplicitFlag(string command)
     {
@@ -19,6 +20,6 @@ public class ReviewToolTests
         using var process=Process.Start(start)!;
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
         Assert.That(process.ExitCode,Is.EqualTo(2));
-        Assert.That(await process.StandardError.ReadToEndAsync(),Does.Contain("--allow-store-write"));
+        Assert.That(await process.StandardError.ReadToEndAsync(),Does.Contain(command == "socket-smoke" ? "--allow-loopback" : "--allow-store-write"));
     }
 }

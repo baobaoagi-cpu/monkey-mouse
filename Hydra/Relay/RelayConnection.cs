@@ -12,6 +12,7 @@ public class RelayConnection(IHydraProfile profile, ILogger<RelayConnection> log
     : SimpleHostedService(log), IStyxClient, IRelaySender
 {
     private SecureRelayAdapter? _approvedTransport;
+    private int _sessionActive;
     // Retained for derived test types/source compatibility; no legacy connection loop exists.
     protected virtual TimeSpan ReconnectDelay => TimeSpan.FromSeconds(Constants.ReconnectDelaySeconds);
     protected CancellationToken ConnectionToken { get; private set; }
@@ -35,16 +36,22 @@ public class RelayConnection(IHydraProfile profile, ILogger<RelayConnection> log
 
     public async Task RunApprovedSession(SecurePeerSession session, CancellationToken cancel = default)
     {
-        if (_approvedTransport != null) throw new InvalidOperationException("A session is already attached");
-        await using var transport = new SecureRelayAdapter(session);
-        _approvedTransport = transport;
-        transport.MessageReceived += OnReceive;
-        transport.PeersChanged += OnPeers;
-        transport.Disconnected += async () => { await OnDisconnected(); if (Disconnected != null) await Disconnected(); };
-        ConnectionToken = cancel;
-        try { await OnAuthenticated(); await transport.Run(cancel); }
-        finally { _approvedTransport = null; }
+        if (Interlocked.CompareExchange(ref _sessionActive, 1, 0) != 0)
+            throw new InvalidOperationException("A session is already attached");
+        try
+        {
+            await using var transport = new SecureRelayAdapter(session);
+            _approvedTransport = transport;
+            transport.MessageReceived += OnReceive;
+            transport.PeersChanged += OnPeers;
+            transport.Disconnected += async () => { await OnDisconnected(); if (Disconnected != null) await Disconnected(); };
+            ConnectionToken = cancel;
+            await OnAuthenticated();
+            await transport.Run(cancel);
+        }
+        finally { _approvedTransport = null; Volatile.Write(ref _sessionActive, 0); }
     }
+
     protected virtual void OnSent(string[] targetHosts, byte[] payload) { }
     protected virtual async Task OnReceive(string sourceHost, MessageKind kind, ReadOnlyMemory<byte> body)
     {

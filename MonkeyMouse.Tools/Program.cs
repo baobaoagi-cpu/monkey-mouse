@@ -28,6 +28,9 @@ Read-only commands:
   displays --host Mac|ASUS
   config-check --measurements <json>
 
+Explicit synthetic transport test (opens loopback TCP; no native input or persistent vault):
+  socket-smoke --allow-loopback
+
 Protected storage commands (explicit --allow-store-write required):
   storage-self-test                  Dedicated temporary native item; cleans up only that item
   identity-init                     Create this device's independent key; never replace existing identity
@@ -46,6 +49,9 @@ run/input/install/service are intentionally unavailable until native-store and h
             var path=Option("--measurements")??throw new ArgumentException("Missing --measurements");
             var measurement=JsonSerializer.Deserialize<FourScreenMeasurements>(File.ReadAllText(path),json)??throw new ArgumentException("Invalid measurements");
             Console.WriteLine(JsonSerializer.Serialize(FourScreenProfileBuilder.Build(measurement),json));break;
+        case "socket-smoke":
+            if(!args.Contains("--allow-loopback"))throw new InvalidOperationException("socket-smoke opens temporary loopback TCP sockets; explicitly add --allow-loopback. No native input or persistent identity is used.");
+            Console.WriteLine(JsonSerializer.Serialize(await LoopbackSmoke.Run(),json));break;
         case "storage-self-test":RequireWriteConsent();Console.WriteLine(NativeStoreSelfTest.Run());break;
         case "identity-init":RequireWriteConsent();using(var vault=DeviceVault.Create(NativeStore()))Console.WriteLine($"Monkey Mouse Device ID: {vault.DeviceId}");break;
         case "identity-show":RequireWriteConsent();using(var vault=DeviceVault.Open(NativeStore()))Console.WriteLine($"Monkey Mouse Device ID: {vault.DeviceId}");break;
@@ -62,7 +68,7 @@ run/input/install/service are intentionally unavailable until native-store and h
     }
     return 0;
 }
-catch(Exception ex)when(ex is ArgumentException or InvalidOperationException or IOException or System.Security.Cryptography.CryptographicException or System.Text.Json.JsonException)
+catch(Exception ex)when(ex is ArgumentException or InvalidOperationException or IOException or System.Security.Cryptography.CryptographicException or System.Text.Json.JsonException or System.Net.Sockets.SocketException or System.Security.Authentication.AuthenticationException or OperationCanceledException)
 {
     Console.Error.WriteLine($"Monkey Mouse: {ex.Message}");return 2;
 }

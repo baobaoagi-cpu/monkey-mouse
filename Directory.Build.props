@@ -1,0 +1,6 @@
+<!-- Monkey Mouse, modified 2026-09-13; GPL-2.0. Lock the complete supported target graph on either host. -->
+<Project>
+  <PropertyGroup>
+    <RuntimeIdentifiers>win-x64;osx-arm64</RuntimeIdentifiers>
+  </PropertyGroup>
+</Project>
