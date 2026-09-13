@@ -1,5 +1,33 @@
 # Round 1 / ASUS
 
+## 2026-09-13 Windows 獨立準備更新（最新狀態）
+
+本節優先於下方歷史紀錄。父提交 a38de69209938dc5fd2864f2e87e53efd01c6cc3；程式基準仍為 6958594d61217aa47a61fe11649e3570283180fb。本次只有文件變更；Round 1 仍為 **BLOCKED**，未進入第二輪。使用者要求 Windows 先獨立完成能做的準備，本次執行既有工具版本查詢與唯讀 OS 顯示採集。
+
+| Case | 主機／時間（+08:00） | 命令或方法 | 結果 | 狀態／本地證據 |
+| --- | --- | --- | --- | --- |
+| R1-W16 | ASUS；2026-09-13 14:45–14:48 | Codex bundled runtime discovery；既有 python.exe -I -B 查詢版本及標準函式庫；Git Bash 以程序限定 python3 function 查版本 | 已有 Python 3.12.14 AMD64；pathlib、json、xml.etree.ElementTree 可用；Bash 可呼叫。無新增安裝或全域 PATH 變更 | PASS；local-only/round-1-python-validation.json |
+| R1-W17 | ASUS；2026-09-13 14:48 | 已讀 collector 的本地唯讀衍生採集器：專用執行緒 PMv2 EnumDisplayMonitors/GetMonitorInfoW；與 EnumDisplaySettingsExW current mode 比對 | 兩個啟用螢幕的像素位置與尺寸逐項相同；外接在左、筆電在右，水平邊界相接且垂直重疊，並非鏡像。current mode 是目前桌面模式，不等於面板最大原生解析度 | PASS；local-only/round-1-displays-independent.json；local-only/collect-display-independent.ps1 |
+| R1-W18 | ASUS；2026-09-13 14:48 | EnumDisplayDevicesW EDD_GET_DEVICE_INTERFACE_NAME 與 WmiMonitorConnectionParams 完整 instance 配對 | 每個輸出恰好匹配一個 Active 裝置；INTERNAL 對應 WindowsLaptop，外接輸出對應 WindowsExternal。沒有以 Primary 猜角色 | PASS；同上及 local-only/round-1-monitor-connections.json |
+| R1-W19 | ASUS；2026-09-13 14:48 | GetScaleFactorForMonitor 與 GetDpiForMonitor，返回碼皆成功 | 確認兩屏使用不同縮放；preliminary inventory 的座標空間缺口已在 OS 層補足。精確縮放／座標只留本地；不能自動換算成引擎 MouseScale | PASS（OS 層）；local-only/round-1-displays-independent.json |
+| R1-W20 | ASUS；2026-09-13 14:48 | git check-ignore 本次採集器與三份本地證據 | 全部命中既有 local-only 排除規則 | PASS；本機命令結果 |
+
+採集器只在新建的專用執行緒暫設 DPI awareness，finally 回復原 context；沒有修改顯示設定、解析度、縮放或 Registry。首次以 EnumDisplayDevices 預設 DeviceID 對應 WMI instance 時，檢查拒絕不同識別格式；改用 device-interface-name flag 後才完成完整 instance 配對，未以中間結果宣稱 PASS。
+
+Python 使用 Codex 已有 bundled runtime，未下載第三方 Python。後續可在受控 Bash 程序定義 python3 function 指向該 executable，不修改 review/test.sh 或系統 PATH。函式只在版本驗證程序存在，未宣稱全系統已有 python3 命令。
+
+### 剩餘工作與責任
+
+- **Windows／WAITING_APPROVAL**：restore/build/離線測試尚未執行。SDK、Python 缺項已解除，但 Windows 編譯與回歸仍無 PASS；引擎 CLI 的螢幕 ID、啟動程序 DPI awareness 與 MouseScale 尚待驗證。目前只有 OS inventory 已核對。
+- **Mac 整合／BLOCKED**：讀本次 Windows 提交與既有 Mac 4c55a644c4c9a45eeb47523da135ce84d1f76bba 報告，更新 decision，移除 Windows SDK／Python／OS 顯示角色與座標空間缺項；保留引擎層驗證、雙端私下四角色座標對齊及可信 LAN 確認。
+- **雙端／NOT_RUN**：正式身份、native-store、socket/LAN listener、真實鍵鼠與剪貼簿均未執行。沒有調整 runtime gate、ShareMouse、配對密碼、加密、權限或防火牆，沒有重啟 Windows。
+- **使用者**：目前不用向 Mac 轉貼長篇訊息。下一次通知 Mac 時，提供本次報告提交 SHA 即可；本節不是要求立即進入第二輪。
+
+### 給 Mac 的唯一下一步
+
+請讀本次完整提交 SHA 的 Windows 報告，更新同輪 decision，明列 Windows 已備妥的工具與 OS 雙屏資料；整理剩餘引擎層驗證及私下資料對齊的具體工作。不要重複要求安裝 Python 或 SDK，也不要把四屏連線標為 PASS。
+
+
 ## 2026-09-13 SDK 準備更新（目前狀態）
 
 - 狀態仍為 **BLOCKED**，但 Windows SDK 缺項已解除。以下更新優先於後文保留的首次盤點；沒有進入第二輪。
