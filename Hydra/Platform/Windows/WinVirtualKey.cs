@@ -1,0 +1,116 @@
+namespace Hydra.Platform.Windows;
+
+// Windows virtual key codes (VK_* from WinUser.h)
+internal static class WinVirtualKey
+{
+    // editing / control
+    internal const int Back = 0x08;        // backspace
+    internal const int Tab = 0x09;
+    internal const int Return = 0x0D;
+    internal const int Escape = 0x1B;
+    internal const int Space = 0x20;
+
+    // navigation
+    internal const int Prior = 0x21;       // page up
+    internal const int Next = 0x22;        // page down
+    internal const int End = 0x23;
+    internal const int Home = 0x24;
+    internal const int Left = 0x25;
+    internal const int Up = 0x26;
+    internal const int Right = 0x27;
+    internal const int Down = 0x28;
+    internal const int Insert = 0x2D;
+    internal const int Delete = 0x2E;
+
+    // windows keys
+    internal const int LWin = 0x5B;
+    internal const int RWin = 0x5C;
+
+    // letters and digits
+    internal const int A = 0x41;
+    internal const int Z = 0x5A;
+    internal const int D0 = 0x30;
+    internal const int D9 = 0x39;
+
+    // OEM punctuation
+    internal const int Oem1 = 0xBA;      // ;:
+    internal const int OemPlus = 0xBB;   // =+
+    internal const int OemComma = 0xBC;  // ,<
+    internal const int OemMinus = 0xBD;  // -_
+    internal const int OemPeriod = 0xBE; // .>
+    internal const int Oem2 = 0xBF;      // /?
+    internal const int Oem3 = 0xC0;      // `~
+    internal const int Oem4 = 0xDB;      // [{
+    internal const int Oem5 = 0xDC;      // \|
+    internal const int Oem6 = 0xDD;      // ]}
+    internal const int Oem7 = 0xDE;      // '"
+
+    // numpad
+    internal const int Numpad0 = 0x60;
+    internal const int Numpad1 = 0x61;
+    internal const int Numpad2 = 0x62;
+    internal const int Numpad3 = 0x63;
+    internal const int Numpad4 = 0x64;
+    internal const int Numpad5 = 0x65;
+    internal const int Numpad6 = 0x66;
+    internal const int Numpad7 = 0x67;
+    internal const int Numpad8 = 0x68;
+    internal const int Numpad9 = 0x69;
+    internal const int Multiply = 0x6A;
+    internal const int Add = 0x6B;
+    internal const int Subtract = 0x6D;
+    internal const int Decimal = 0x6E;
+    internal const int Divide = 0x6F;
+
+    // function keys
+    internal const int F1 = 0x70;
+    internal const int F2 = 0x71;
+    internal const int F3 = 0x72;
+    internal const int F4 = 0x73;
+    internal const int F5 = 0x74;
+    internal const int F6 = 0x75;
+    internal const int F7 = 0x76;
+    internal const int F8 = 0x77;
+    internal const int F9 = 0x78;
+    internal const int F10 = 0x79;
+    internal const int F11 = 0x7A;
+    internal const int F12 = 0x7B;
+    internal const int F13 = 0x7C;
+    internal const int F14 = 0x7D;
+    internal const int F15 = 0x7E;
+    internal const int F16 = 0x7F;
+    internal const int F17 = 0x80;
+    internal const int F18 = 0x81;
+    internal const int F19 = 0x82;
+    internal const int F20 = 0x83;
+
+    // lock keys
+    internal const int Capital = 0x14;     // caps lock
+    internal const int Numlock = 0x90;
+    internal const int Scroll = 0x91;      // scroll lock
+    internal const int Pause = 0x13;
+    internal const int Snapshot = 0x2C;    // print screen
+    internal const int Apps = 0x5D;        // applications / context menu
+
+    // modifiers — left and right variants
+    internal const int LShift = 0xA0;
+    internal const int RShift = 0xA1;
+    internal const int LControl = 0xA2;
+    internal const int RControl = 0xA3;
+    internal const int LMenu = 0xA4;       // left alt
+    internal const int RMenu = 0xA5;       // right alt / AltGr
+
+    // generic modifier VKs (used for key state array indexing)
+    internal const int Shift = 0x10;
+    internal const int Control = 0x11;
+    internal const int Menu = 0x12;        // alt
+
+    // media keys
+    internal const int VolumeMute = 0xAD;
+    internal const int VolumeDown = 0xAE;
+    internal const int VolumeUp = 0xAF;
+    internal const int MediaNextTrack = 0xB0;
+    internal const int MediaPrevTrack = 0xB1;
+    internal const int MediaStop = 0xB2;
+    internal const int MediaPlayPause = 0xB3;
+}

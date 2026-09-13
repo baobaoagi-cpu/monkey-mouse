@@ -1,0 +1,47 @@
+using Cathedral.Utils;
+using Microsoft.Extensions.Logging;
+
+namespace Hydra.Platform;
+
+// shared polling loop for screensaver detection.
+// subclasses implement IsScreensaverOn() and the activation/idle reset methods.
+// always running as a hosted service; fires ScreensaverActivated/Deactivated events on state changes.
+public abstract class PollingScreenSaverSync(ILogger log) : SimpleHostedService(log, TimeSpan.FromSeconds(1)), IScreenSaverSync
+{
+    private readonly ILogger _log = log;
+    private bool _wasOn;
+
+    public event Action? ScreensaverActivated;
+    public event Action? ScreensaverDeactivated;
+    public event Action? ScreenLocked;
+    public event Action? ScreenUnlocked;
+
+    protected abstract bool IsScreensaverOn();
+    public abstract void Activate();
+    public abstract void Deactivate();
+    public abstract void ResetIdleTimer();
+    public virtual void LockScreen() { }
+
+    // the Windows and Linux idle-timer pokes (SendInput / DPMSForceLevel) already power the displays back on
+    public virtual void WakeDisplay() => ResetIdleTimer();
+
+    protected void OnScreenLocked() => ScreenLocked?.Invoke();
+    protected void OnScreenUnlocked() => ScreenUnlocked?.Invoke();
+
+    protected override Task Execute(CancellationToken cancel)
+    {
+        var isOn = IsScreensaverOn();
+        if (isOn && !_wasOn)
+        {
+            _log.LogInformation("Screensaver started (poll detected)");
+            ScreensaverActivated?.Invoke();
+        }
+        else if (!isOn && _wasOn)
+        {
+            _log.LogInformation("Screensaver stopped (poll detected)");
+            ScreensaverDeactivated?.Invoke();
+        }
+        _wasOn = isOn;
+        return Task.CompletedTask;
+    }
+}

@@ -1,0 +1,63 @@
+using Cathedral.Extensions;
+
+namespace Hydra.Screen;
+
+public enum Direction { Left, Right, Up, Down }
+
+public static class DirectionExtensions
+{
+    public static Direction Opposite(this Direction dir) => dir switch
+    {
+        Direction.Left => Direction.Right,
+        Direction.Right => Direction.Left,
+        Direction.Up => Direction.Down,
+        Direction.Down => Direction.Up,
+        _ => throw new ArgumentOutOfRangeException(nameof(dir), dir, null),
+    };
+}
+
+public class ScreenIdentity
+{
+    public required string ScreenName { get; init; }
+    public string? Output { get; init; }
+    public string? DisplayName { get; init; }
+    public string? PlatformId { get; init; }
+
+    public bool Matches(string id) =>
+        ScreenName.EqualsIgnoreCase(id)
+        || Output?.EqualsIgnoreCase(id) is true
+        || DisplayName?.EqualsIgnoreCase(id) is true
+        || PlatformId?.EqualsIgnoreCase(id) is true;
+}
+
+public record ScreenBounds(int X, int Y, int Width, int Height);
+
+public interface IBounded
+{
+    ScreenBounds Bounds { get; }
+}
+
+public record ScreenRect(
+    string Name,      // unique id, e.g. "host:0", "host:1"
+    string Host,      // hostname for relay routing
+    int X, int Y,     // top-left in host coordinate space
+    int Width, int Height,
+    bool IsLocal,     // true = local screen on this machine
+    ScreenIdentity? Identity = null)
+    : IBounded
+{
+    public ScreenBounds Bounds => new(X, Y, Width, Height);
+
+    public bool Contains(double x, double y) =>
+        x >= X && x < X + Width && y >= Y && y < Y + Height;
+
+    public static bool ScreenListChanged(IReadOnlyList<IBounded> a, IReadOnlyList<IBounded> b)
+    {
+        if (a.Count != b.Count) return true;
+        for (var i = 0; i < a.Count; i++)
+            if (a[i].Bounds != b[i].Bounds) return true;
+        return false;
+    }
+}
+
+public record EdgeHit(ScreenRect Destination, Direction Direction, int EntryX, int EntryY);

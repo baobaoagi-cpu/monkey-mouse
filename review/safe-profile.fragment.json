@@ -1,0 +1,36 @@
+{
+  "name": "ASUS",
+  "autoUpdate": false,
+  "profiles": [
+    {
+      "profileName": "four-screen-review",
+      "mode": "Master",
+      "enableFileTransfer": false,
+      "syncScreensaver": false,
+      "screenLockPropagation": false,
+      "allowRemoteLock": false,
+      "allowRemoteWake": false,
+      "hosts": [
+        {
+          "name": "ASUS",
+          "neighbours": [
+            {
+              "direction": "down",
+              "name": "Mac",
+              "sourceScreen": "REPLACE_WITH_ASUS_EXTERNAL_SCREEN_ID",
+              "destScreen": "REPLACE_WITH_BENQ_SCREEN_ID",
+              "sourceStart": 0,
+              "sourceEnd": 100,
+              "destStart": 0,
+              "destEnd": 100,
+              "mirror": true
+            }
+          ]
+        },
+        {
+          "name": "Mac"
+        }
+      ]
+    }
+  ]
+}

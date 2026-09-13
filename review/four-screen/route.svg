@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="510" viewBox="0 0 900 510">
+<defs><marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto-start-reverse"><path d="M0,0 L6,3 L0,6" fill="none" stroke="#7356dc" stroke-width="1.5"/></marker></defs>
+<rect width="900" height="510" fill="#f5f7fc"/><g font-family="sans-serif" fill="#18324c">
+<text x="40" y="43" font-size="23" font-weight="bold">四螢幕共享滑鼠 · 離線路由示意</text><text x="40" y="69" font-size="14">配置與幾何測試已建立；圖中比例不是實機尺寸。</text>
+<g fill="white" stroke="#b7c6d9" stroke-width="2"><rect x="55" y="100" width="360" height="140" rx="12"/><rect x="535" y="125" width="285" height="115" rx="12"/><rect x="55" y="335" width="285" height="115" rx="12"/><rect x="460" y="310" width="360" height="140" rx="12"/></g>
+<text x="90" y="155" font-size="21">Windows 外接大螢幕</text><text x="90" y="185" font-size="15">ASUS 的滑鼠／鍵盤入口</text><text x="575" y="177" font-size="21">Windows 筆電</text>
+<text x="102" y="386" font-size="21">MacBook</text><text x="552" y="365" font-size="21">BenQ 外接螢幕</text><text x="552" y="395" font-size="15">Mac 的指定跨機入口</text>
+<path d="M235 245 C235 285 640 265 640 305" fill="none" stroke="#7356dc" stroke-width="4" marker-start="url(#a)" marker-end="url(#a)"/>
+<text x="307" y="280" font-size="15" fill="#6241c7">下緣 ↔ 上緣：指定映射</text>
+<path d="M350 393 L445 393 M430 185 L515 185" fill="none" stroke="#7356dc" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
+<text x="40" y="490" font-size="15">同一台電腦左右移動保留本機座標；不建立 MacBook ↔ Windows 筆電的跨機連線。</text></g></svg>

@@ -1,0 +1,39 @@
+{
+  "WindowsExternal": {
+    "ScreenId": null,
+    "X": null,
+    "Y": null,
+    "Width": null,
+    "Height": null,
+    "Scale": null
+  },
+  "WindowsLaptop": {
+    "ScreenId": null,
+    "X": null,
+    "Y": null,
+    "Width": null,
+    "Height": null,
+    "Scale": null
+  },
+  "MacBook": {
+    "ScreenId": null,
+    "X": null,
+    "Y": null,
+    "Width": null,
+    "Height": null,
+    "Scale": null
+  },
+  "BenQ": {
+    "ScreenId": null,
+    "X": null,
+    "Y": null,
+    "Width": null,
+    "Height": null,
+    "Scale": null
+  },
+  "CoordinateSpace": null,
+  "SourceStart": 0,
+  "SourceEnd": 100,
+  "DestStart": 0,
+  "DestEnd": 100
+}

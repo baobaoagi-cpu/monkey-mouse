@@ -1,0 +1,117 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "Cathedral": {
+        "type": "Direct",
+        "requested": "[0.0.464, )",
+        "resolved": "0.0.464",
+        "contentHash": "Tr0SkP1KDrF5EvrPiO7tgNT1mE9QaQiJdeVVAiA7mVjg2wiNYXme+qbYRzoBMJEJH3t0GXNyaq0kIieU5qZBNg==",
+        "dependencies": {
+          "ByteSize": "2.1.2",
+          "MessagePack": "3.1.8",
+          "Microsoft.AspNetCore.OpenApi": "10.0.11",
+          "Microsoft.EntityFrameworkCore.Relational": "9.0.19",
+          "Microsoft.OpenApi": "2.12.2",
+          "Scalar.AspNetCore": "2.17.2",
+          "TimeZoneConverter": "7.2.0"
+        }
+      },
+      "Microsoft.AspNetCore.SignalR.Protocols.MessagePack": {
+        "type": "Direct",
+        "requested": "[10.0.11, )",
+        "resolved": "10.0.11",
+        "contentHash": "rZXe/AAxEMCYcya2CqK7veMVavIm04+CLOyXpmU1clXJ0MMaU2OogU0e8kshN2/ahOhYC54HkkOFr/gFvNtJBw==",
+        "dependencies": {
+          "MessagePack": "2.5.302"
+        }
+      },
+      "ByteSize": {
+        "type": "Transitive",
+        "resolved": "2.1.2",
+        "contentHash": "dSiH9B0apNU5abV3OVUs3eTfHiidEAa8IMOLGW0eEl5tB8Ba1ngkGC7RT/RGy61ifGcPzCe7DMP78KB8pA5kNg=="
+      },
+      "MessagePack": {
+        "type": "Transitive",
+        "resolved": "3.1.8",
+        "contentHash": "Qk2q+9FVxnMSp+NQ9y3SLz3HqWe7Rg3KRMHhBX28FkKUoOeP9YIU86mA4pFOxDDjUIRA9e7Ssbxs/LwWUcAzPw==",
+        "dependencies": {
+          "MessagePack.Annotations": "3.1.8",
+          "MessagePackAnalyzer": "3.1.8",
+          "Microsoft.NET.StringTools": "17.11.4"
+        }
+      },
+      "MessagePack.Annotations": {
+        "type": "Transitive",
+        "resolved": "3.1.8",
+        "contentHash": "SitOtZ4tOlAZZPF7p52M7143F+Cuz7o/aU0MrtAXX0+ZkPXzDNroOFhzzE2ogMFThsoEW/E6akXVVcBFM9ZKaw=="
+      },
+      "MessagePackAnalyzer": {
+        "type": "Transitive",
+        "resolved": "3.1.8",
+        "contentHash": "Vm4g0cR4YRKRchEOmMJ0uVFU6yxdg7cJa2KHv3SUAHEsdYKvMpHMF5A1hZfsix89ymD5cmuzRnw9a6dKMcvq+Q=="
+      },
+      "Microsoft.AspNetCore.OpenApi": {
+        "type": "Transitive",
+        "resolved": "10.0.11",
+        "contentHash": "R/1EATnPLU+gRfB6lwVkMcymmyAY5ppBBdRN/5lhNEiT3xP1sWccuSFkU/f1lQvN/WgRq5Vn8AhCdE3fqgsL/w==",
+        "dependencies": {
+          "Microsoft.OpenApi": "[2.7.5, 3.0.0)"
+        }
+      },
+      "Microsoft.EntityFrameworkCore": {
+        "type": "Transitive",
+        "resolved": "9.0.19",
+        "contentHash": "qWqqxrfEDfi3C/z0S/ACIA2gUnreRPHX74WE/dVnesbztNesYO4NLy76lE6FV/zDP4vH/pkvDr8h3Mq9+cFv/w==",
+        "dependencies": {
+          "Microsoft.EntityFrameworkCore.Abstractions": "9.0.19",
+          "Microsoft.EntityFrameworkCore.Analyzers": "9.0.19"
+        }
+      },
+      "Microsoft.EntityFrameworkCore.Abstractions": {
+        "type": "Transitive",
+        "resolved": "9.0.19",
+        "contentHash": "igPnmVL3DU2ZH/4DNeQqWttNrQpwwg0q6MWj5peZxtl0QVMDSeFtnt2yhhdSffklZKYsAFko1sh/va3z4y7S6A=="
+      },
+      "Microsoft.EntityFrameworkCore.Analyzers": {
+        "type": "Transitive",
+        "resolved": "9.0.19",
+        "contentHash": "yI5dQuvigJ6ICQECOlJDtrsUYcuDryv3qsZK1i6ZA/IzMzZ/VPkDzjE4r2LivuyVSGnkDRkH2cp4LmrhXARRKw=="
+      },
+      "Microsoft.EntityFrameworkCore.Relational": {
+        "type": "Transitive",
+        "resolved": "9.0.19",
+        "contentHash": "KAfYGG4LWRNn1G/vMRydxgOjuZoWUvdd5raUcIia/HPg1jUjlQzS386nUx5gt3YfKxpFJaCGxdsQ1nCZWuYR8A==",
+        "dependencies": {
+          "Microsoft.EntityFrameworkCore": "9.0.19"
+        }
+      },
+      "Microsoft.NET.StringTools": {
+        "type": "Transitive",
+        "resolved": "17.11.4",
+        "contentHash": "mudqUHhNpeqIdJoUx2YDWZO/I9uEDYVowan89R6wsomfnUJQk6HteoQTlNjZDixhT2B4IXMkMtgZtoceIjLRmA=="
+      },
+      "Microsoft.OpenApi": {
+        "type": "Transitive",
+        "resolved": "2.12.2",
+        "contentHash": "ZkT7qiJe0Kj0+DTZOZo+xrDy1kNmdsWFQVPIQLNx9ZJ0T9cB2LG7r+Bi60so8/+yg1nkS7QCPadrzsTG4VPKrA=="
+      },
+      "Scalar.AspNetCore": {
+        "type": "Transitive",
+        "resolved": "2.17.2",
+        "contentHash": "ciW2HuRWJgNEecophHN9DvoRlTs/+8TNPhB6tQW1gmJWh/eoAIO0ys8XIxx7irUpIu3KRHZyxyuHstqqrTn1Tw=="
+      },
+      "TimeZoneConverter": {
+        "type": "Transitive",
+        "resolved": "7.2.0",
+        "contentHash": "4Poqu79dTmacVETqUJ53g3x4U21V/cmWPSlehdsVE4Q00akavvlRq+SRjcg/CmfO9ibOCjRl6TeUV7hkC5RC4w=="
+      },
+      "common": {
+        "type": "Project",
+        "dependencies": {
+          "Cathedral": "[0.0.464, )"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,171 @@
+using Cathedral.Extensions;
+using Cathedral.Utils;
+using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
+
+namespace Hydra.Relay;
+
+public interface IWorldState
+{
+    // -- master-side --
+    ValueTask<PeerDelta> UpdatePeers(HashSet<string> currentPeers, HashSet<string> configuredSlaves);
+    ValueTask SetPeerScreens(string host, List<ScreenInfoEntry> screens);
+    ValueTask<Dictionary<string, List<ScreenInfoEntry>>> GetPeerScreensSnapshot();
+    ILogger GetOrCreateSlaveLogger(string category, ILoggerFactory factory);
+
+    // -- slave-side --
+    ValueTask AddMaster(string host, MasterConfigMessage config);
+    ValueTask<string[]> GetMasters();
+    ValueTask<Dictionary<string, MasterConfigMessage>> GetMasterConfigs();
+    ValueTask PruneMasters(HashSet<string> activePeers);
+
+    // -- shared (encryption) --
+    ValueTask SetRemoteKey(string host, SimpleAesKey key);
+    ValueTask<SimpleAesKey?> GetRemoteKey(string host);
+
+    // -- master-side (relay reconnect) --
+    ValueTask ClearPeers();
+
+    // -- master-side (peer platform) --
+    ValueTask SetPeerPlatform(string host, PeerPlatform platform);
+    ValueTask<PeerPlatform> GetPeerPlatform(string host);
+}
+
+public class WorldState : IWorldState
+{
+    private readonly SemaphoreSlimValue<MasterState> _master = new(new MasterState(), disposeValue: false);
+    private readonly SemaphoreSlimValue<SlaveState> _slave = new(new SlaveState(), disposeValue: false);
+    private readonly ConcurrentDictionary<string, SimpleAesKey> _remoteKeys = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, ILogger> _loggers = new(StringComparer.OrdinalIgnoreCase);
+
+    public async ValueTask<PeerDelta> UpdatePeers(HashSet<string> currentPeers, HashSet<string> configuredSlaves)
+    {
+        List<string> newPeers;
+        List<string> departed;
+        Dictionary<string, List<ScreenInfoEntry>> snapshot;
+
+        using (var m = await _master.WaitForDisposable())
+        {
+            var s = m.Value;
+            newPeers = [.. currentPeers.Where(h => !s.KnownPeers.Contains(h) && configuredSlaves.Contains(h))];
+            departed = [.. s.KnownPeers.Where(h => !currentPeers.Contains(h))];
+
+            foreach (var host in departed)
+            {
+                s.KnownPeers.Remove(host);
+                s.PeerScreens.Remove(host);
+                s.PeerPlatforms.Remove(host);
+                foreach (var k in _loggers.Keys.Where(k => k.StartsWithIgnoreCase($"slave:{host}/")).ToList())
+                    _loggers.TryRemove(k, out _);
+            }
+            s.KnownPeers.UnionWith(currentPeers);
+            snapshot = s.PeerScreens.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+        }
+
+        // prune encryption keys and slave masters for departed hosts
+        if (departed.Count > 0)
+        {
+            foreach (var host in departed)
+                _remoteKeys.TryRemove(host, out _);
+
+            using var sl = await _slave.WaitForDisposable();
+            foreach (var key in departed.Where(sl.Value.Masters.ContainsKey).ToList())
+                sl.Value.Masters.Remove(key);
+        }
+
+        return new PeerDelta(newPeers, departed.Count > 0, snapshot);
+    }
+
+    public async ValueTask SetPeerScreens(string host, List<ScreenInfoEntry> screens)
+    {
+        using var m = await _master.WaitForDisposable();
+        m.Value.PeerScreens[host] = screens;
+    }
+
+    public async ValueTask<Dictionary<string, List<ScreenInfoEntry>>> GetPeerScreensSnapshot()
+    {
+        using var m = await _master.WaitForDisposable();
+        return m.Value.PeerScreens.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    public ILogger GetOrCreateSlaveLogger(string category, ILoggerFactory factory) =>
+        _loggers.GetOrAdd(category, c => factory.CreateLogger(c));
+
+    public async ValueTask AddMaster(string host, MasterConfigMessage config)
+    {
+        using var s = await _slave.WaitForDisposable();
+        s.Value.Masters[host] = config;
+    }
+
+    public async ValueTask<string[]> GetMasters()
+    {
+        using var s = await _slave.WaitForDisposable();
+        return [.. s.Value.Masters.Keys];
+    }
+
+    public async ValueTask<Dictionary<string, MasterConfigMessage>> GetMasterConfigs()
+    {
+        using var s = await _slave.WaitForDisposable();
+        return new Dictionary<string, MasterConfigMessage>(s.Value.Masters, StringComparer.OrdinalIgnoreCase);
+    }
+
+    public async ValueTask PruneMasters(HashSet<string> activePeers)
+    {
+        using var s = await _slave.WaitForDisposable();
+        foreach (var key in s.Value.Masters.Keys.Where(h => !activePeers.Contains(h)).ToList())
+        {
+            s.Value.Masters.Remove(key);
+            _remoteKeys.TryRemove(key, out _); // drop the departed master's cached encryption key
+        }
+    }
+
+    public async ValueTask ClearPeers()
+    {
+        using var m = await _master.WaitForDisposable();
+        var s = m.Value;
+        s.KnownPeers.Clear();
+        s.PeerScreens.Clear();
+        s.PeerPlatforms.Clear();
+        _loggers.Clear();
+        _remoteKeys.Clear(); // keys are re-derived from the message salt on reconnect
+    }
+
+    public async ValueTask SetPeerPlatform(string host, PeerPlatform platform)
+    {
+        using var m = await _master.WaitForDisposable();
+        m.Value.PeerPlatforms[host] = platform;
+    }
+
+    public async ValueTask<PeerPlatform> GetPeerPlatform(string host)
+    {
+        using var m = await _master.WaitForDisposable();
+        return m.Value.PeerPlatforms.TryGetValue(host, out var p) ? p : PeerPlatform.Unknown;
+    }
+
+    public ValueTask SetRemoteKey(string host, SimpleAesKey key)
+    {
+        _remoteKeys[host] = key;
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask<SimpleAesKey?> GetRemoteKey(string host) =>
+        new(_remoteKeys.TryGetValue(host, out var key) ? key : null);
+
+    private class MasterState
+    {
+        public HashSet<string> KnownPeers = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, List<ScreenInfoEntry>> PeerScreens = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, PeerPlatform> PeerPlatforms = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private class SlaveState
+    {
+        public Dictionary<string, MasterConfigMessage> Masters = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+}
+
+public record PeerDelta(
+    List<string> NewPeers,
+    bool AnyDeparted,
+    Dictionary<string, List<ScreenInfoEntry>> PeerScreensSnapshot);

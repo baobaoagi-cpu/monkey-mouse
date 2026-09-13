@@ -1,0 +1,422 @@
+// Modified 2026-09-13 for the offline safety review fork; GPL-2.0. See MODIFICATIONS.md.
+using Common;
+using System.Text;
+using Cathedral.Extensions;
+using Cathedral.Logging;
+using Cathedral.Utils;
+using Hydra.Config;
+using Hydra.FileTransfer;
+using Hydra.Platform;
+using Hydra.Platform.Linux;
+using Hydra.Platform.MacOs;
+using Hydra.Platform.Windows;
+using Hydra.Relay;
+using Hydra.Screen;
+using Hydra.Update;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+
+if (!ReviewBuildPolicy.RuntimeEnabled)
+{
+    Console.Error.WriteLine("Monkey Mouse development review: input-controller startup is blocked; use the review tooling or test harness.");
+    Environment.ExitCode = 2;
+    return;
+}
+
+try { ReviewBuildPolicy.EnsureManualSession(args); }
+catch (NotSupportedException ex)
+{
+    Console.Error.WriteLine(ex.Message);
+    Environment.ExitCode = 2;
+    return;
+}
+
+// ensure console can display non-ASCII characters (e.g. '€', 'ø') in debug logs
+Console.OutputEncoding = Encoding.UTF8;
+
+// catch unhandled exceptions on any thread before they silently kill the process
+AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+{
+    Console.Error.WriteLine($"[FATAL] Unhandled exception (terminating={e.IsTerminating}): {e.ExceptionObject}");
+    // restore system cursors in case we crash while they're blanked
+    if (OperatingSystem.IsWindows())
+        WindowsCursorSnapshot.RestoreDefaults();
+};
+TaskScheduler.UnobservedTaskException += (_, e) =>
+{
+    Console.Error.WriteLine($"[FATAL] Unobserved task exception: {e.Exception}");
+    e.SetObserved();
+};
+
+HydraConfigFile configFile;
+List<HydraConfig> profiles;
+string configPath;
+string? lastConfigError = null;
+while (true)
+{
+    try
+    {
+        (configFile, configPath) = HydraConfigFile.LoadAll(Env.Config);
+        profiles = configFile.Profiles;
+        break;
+    }
+    catch (Exception ex) when (ex is IOException or InvalidOperationException or System.Text.Json.JsonException)
+    {
+        // don't hard-exit on a missing/invalid config: under launchd/service KeepAlive that turns into a
+        // ~5s relaunch storm that spams the redirect logs forever. Stay alive and retry so a corrected
+        // config is picked up automatically. Log the message once (and again only if it changes).
+        if (ex.Message != lastConfigError)
+        {
+            Console.Error.WriteLine(ex.Message);
+            lastConfigError = ex.Message;
+        }
+        await Task.Delay(TimeSpan.FromSeconds(30));
+    }
+}
+
+// acquire process lock if configured — prevents two instances from running with the same config
+ProcessLock? processLock = null;
+if (configFile.LockFile is { } lockFileSetting)
+{
+    var lockPath = Path.IsPathRooted(lockFileSetting)
+        ? lockFileSetting
+        : Path.GetFullPath(lockFileSetting, Path.GetDirectoryName(configPath)!);
+    try
+    {
+        processLock = ProcessLock.Acquire(lockPath);
+    }
+    catch (InvalidOperationException ex)
+    {
+        Console.Error.WriteLine(ex.Message);
+        return;
+    }
+}
+
+// on macOS, pre-start the shield before DI so network state is available for config resolution.
+// the shield (NSApplication) activates WiFi/location on demand when "wifi" is sent via stdin.
+MacNetworkState? macNetworkState = null;
+MacShieldProcess? macShield = null;
+if (OperatingSystem.IsMacOS())
+{
+    var needsWifi = HydraConfig.HasSsidConditions(profiles);
+    macNetworkState = new MacNetworkState();
+    macShield = new MacShieldProcess(macNetworkState, needsWifi);
+    await macShield.WaitForInitialState(TimeSpan.FromSeconds(3));
+}
+
+var builder = Host.CreateApplicationBuilder(args).DisableEventLog();
+var services = builder.Services;
+
+services.AddEnvironmentConfiguration();
+
+// detect current network/screens and resolve which profile to use
+var detector = await CreateDetector(macNetworkState, services);
+HydraConfig? config;
+if (configFile.Profile != null)
+    config = HydraConfig.Resolve(profiles, new ConditionState([], 1), configFile.Profile);
+else if (!HydraConfig.HasConditions(profiles))
+    config = profiles[0]; // single unconditional profile — no detection needed
+else
+{
+    var activeSsids = (HydraConfig.HasSsidConditions(profiles) ? await detector.GetActiveSsids() : []) ?? [];
+    var screenCount = HydraConfig.HasScreenCountConditions(profiles) ? GetScreenCount() : 1;
+    var isPluggedIn = HydraConfig.HasPluggedInConditions(profiles) ? await detector.GetIsPluggedIn() : null;
+    config = HydraConfig.Resolve(profiles, new ConditionState(activeSsids, screenCount, isPluggedIn));
+}
+
+// derive network config blob from embeddedStyx (explicit) or embeddedStyxServer (auto-localhost)
+string? embeddedNetworkConfig = null;
+if (config?.EmbeddedStyx != null)
+    embeddedNetworkConfig = await NetworkConfig.ComputeEmbeddedBlob(config.EmbeddedStyx.Server, config.EmbeddedStyx.Password);
+else if (config?.EmbeddedStyxServer != null)
+    embeddedNetworkConfig = await NetworkConfig.ComputeEmbeddedBlob($"http://localhost:{config.EmbeddedStyxServer.Port}", config.EmbeddedStyxServer.Password);
+
+var profile = new HydraProfile(configFile, config, embeddedNetworkConfig);
+services.AddSingleton<IHydraProfile>(profile);
+
+services.AddSereneConsoleLogging(c => c.MinLogLevel = profile.LogLevel);
+
+// the session child is where the input hooks and the relay actually run, so in service mode its log is
+// the only one that records a dropped connection or a hook failure. sessionLogFile is usually unset, so
+// fall back to a sibling of logFile rather than silently writing no file log at all.
+var logFileSetting = RunMode.IsSessionChild
+    ? configFile.SessionLogFile ?? (configFile.LogFile is { } mainLog ? Path.ChangeExtension(mainLog, ".session.log") : null)
+    : configFile.LogFile;
+if (logFileSetting is { } logFile)
+{
+    var logPath = Path.IsPathRooted(logFile)
+        ? logFile
+        : Path.GetFullPath(logFile, Path.GetDirectoryName(configPath)!);
+    if (configFile.LogTruncate && File.Exists(logPath))
+        new FileStream(logPath, FileMode.Truncate).Dispose();
+    services.AddSereneFileLogging(logPath, c => c.MinLogLevel = profile.LogLevel);
+}
+
+var startupLog = await services.CreateLogger<HydraProfile>();
+startupLog.LogInformation("Active profile: {ProfileName}", profile.ProfileName ?? "<none>");
+
+foreach (var hotkeyError in profile.Hotkeys.Errors)
+    startupLog.LogWarning("Hotkey config: {Error}", hotkeyError);
+
+if (config?.EmbeddedStyxServer != null)
+{
+    startupLog.LogInformation("Embedded Styx relay on port {Port}", config.EmbeddedStyxServer.Port);
+    startupLog.LogInformation("Remote hosts can connect with: embeddedStyx: {{\"server\": \"http://<your-ip>:{Port}\", \"password\": \"<password>\"}}", config.EmbeddedStyxServer.Port);
+}
+
+// shared services always registered
+services.AddSingleton(profiles);
+services.AddSingleton<ICmdRunner, CmdRunner>();
+services.AddSingleton<INetworkDetector>(_ => detector);
+services.AddSingleton<IWorldState, WorldState>();
+services.AddSingleton<DormancyState>();
+services.AddSingleton<IDormancyState>(sp => sp.GetRequiredService<DormancyState>());
+services.AddHostedService(sp => sp.GetRequiredService<DormancyState>());
+services.AddLazyResolvers(); // enables Lazy<T> injection — used to break circular deps (e.g. ActivityTracker ↔ IRelaySender)
+
+// shield always runs on macOS — handles cursor shielding + network state detection
+if (OperatingSystem.IsMacOS() && macShield != null && macNetworkState != null)
+{
+    macShield.DebugShield = profile.DebugShield;
+    services.AddSingleton(macNetworkState);
+    services.AddSingleton(macShield);
+    services.AddHostedService(_ => macShield);
+}
+
+// network watcher always runs — logs state on startup, triggers restarts on change
+services.AddSingleton(sp => new NetworkWatcher(
+    sp.GetRequiredService<INetworkDetector>(),
+    GetScreenCount,
+    profiles,
+    config,
+    configFile.Profile,
+    sp.GetRequiredService<IDormancyState>(),
+    sp.GetRequiredService<ILogger<NetworkWatcher>>()));
+services.AddHostedService(sp => sp.GetRequiredService<NetworkWatcher>());
+
+if (config != null)
+{
+    // console mode: no X display available — use evdev input and null screen detector
+    var linuxConsoleMode = OperatingSystem.IsLinux() && Environment.GetEnvironmentVariable("DISPLAY") == null;
+
+    // screen detector must be registered before any service that awaits IScreenDetector.Get() at startup
+    if (OperatingSystem.IsMacOS())
+        services.AddHostedService<IScreenDetector, MacScreenDetector>();
+    else if (OperatingSystem.IsWindows())
+        services.AddHostedService<IScreenDetector, WindowsScreenDetector>();
+    else if (linuxConsoleMode)
+        services.AddHostedService<IScreenDetector, NullScreenDetector>();
+    else if (OperatingSystem.IsLinux())
+        services.AddHostedService<IScreenDetector, XorgScreenDetector>();
+    else
+        throw new PlatformNotSupportedException($"Unsupported OS: {Environment.OSVersion}");
+
+    if (profile.Mode == Mode.Master)
+    {
+        if (OperatingSystem.IsMacOS())
+            services.AddSingleton<IPlatformInput, MacInputHandler>();
+        else if (OperatingSystem.IsWindows())
+            services.AddSingleton<IPlatformInput, WindowsInputHandler>();
+        else if (linuxConsoleMode)
+        {
+            if (!profile.RemoteOnly)
+            {
+                Console.Error.WriteLine("No display server available (DISPLAY not set). Set remoteOnly: true in hydra.conf for console operation.");
+                return;
+            }
+            services.AddSingleton<IPlatformInput, EvdevInputHandler>();
+        }
+        else if (OperatingSystem.IsLinux())
+            services.AddSingleton<IPlatformInput, XorgInputHandler>();
+        else
+            throw new PlatformNotSupportedException($"Unsupported OS: {Environment.OSVersion}");
+
+        services.AddHostedService<ICursorHider, CursorHiderService>();
+        services.AddHostedService<InputRouter>();
+    }
+    else if (profile.Mode == Mode.Slave)
+    {
+        if (OperatingSystem.IsMacOS())
+        {
+            services.AddSingleton<MacOutputHandler>();
+            services.AddSingleton<IPlatformOutput>(sp => new CoalescingOutputWrapper(sp.GetRequiredService<MacOutputHandler>()));
+            services.AddSingleton<ICursor>(sp => sp.GetRequiredService<MacOutputHandler>());
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            services.AddSingleton<WindowsOutputHandler>();
+#pragma warning disable CA1416
+            services.AddSingleton<IPlatformOutput>(sp =>
+            {
+                var handler = sp.GetRequiredService<WindowsOutputHandler>();
+                handler.Initialize();
+                return new CoalescingOutputWrapper(handler);
+            });
+            services.AddSingleton<ICursor>(sp => sp.GetRequiredService<WindowsOutputHandler>());
+#pragma warning restore CA1416
+        }
+        else if (OperatingSystem.IsLinux())
+        {
+            services.AddSingleton<XorgOutputHandler>();
+            services.AddSingleton<IPlatformOutput>(sp => new CoalescingOutputWrapper(sp.GetRequiredService<XorgOutputHandler>()));
+            services.AddSingleton<ICursor>(sp => sp.GetRequiredService<XorgOutputHandler>());
+        }
+        else
+            throw new PlatformNotSupportedException($"Unsupported OS: {Environment.OSVersion}");
+
+        services.AddSingleton<IPlatformInput, SlavePlatformInput>();
+
+        // real event tap for local keyboard/mouse activity tracking (events pass through — nothing is consumed)
+        if (OperatingSystem.IsMacOS())
+            services.AddSingleton<ILocalEventTap, MacInputHandler>();
+        else if (OperatingSystem.IsWindows())
+            services.AddSingleton<ILocalEventTap, WindowsInputHandler>();
+        else if (!linuxConsoleMode)
+            services.AddSingleton<ILocalEventTap, XorgInputHandler>();
+        else
+            services.AddSingleton<ILocalEventTap>(sp => sp.GetRequiredService<IPlatformInput>()); // no-op on console
+
+        services.AddHostedService<ICursorHider, CursorHiderService>();
+        services.AddHostedService<SlaveLocalInputWatcher>();
+
+        // forwarder buffers log entries; SlaveLogSender drains them to masters
+        var forwarder = new SlaveLogForwarder();
+        services.AddSingleton(forwarder);
+        services.AddSereneCustomLogging(e => forwarder.ForwardAsync(e).AsTask(), c => c.MinLogLevel = LogLevel.Debug);
+        services.AddHostedService<SlaveLogSender>();
+
+    }
+
+    if (OperatingSystem.IsMacOS())
+        services.AddHostedService<IScreenSaverSync, MacScreenSaverSync>();
+    else if (OperatingSystem.IsWindows())
+        services.AddHostedService<IScreenSaverSync, WindowsScreenSaverSync>();
+    else if (linuxConsoleMode)
+        services.AddSingleton<IScreenSaverSync, NullScreenSaverSync>();
+    else if (OperatingSystem.IsLinux())
+        services.AddHostedService<IScreenSaverSync, XorgScreenSaverSync>();
+    else
+        services.AddSingleton<IScreenSaverSync, NullScreenSaverSync>();
+
+    if (OperatingSystem.IsMacOS())
+        services.AddSingleton<IClipboardSync, MacClipboardSync>();
+    else if (OperatingSystem.IsWindows())
+        services.AddSingleton<IClipboardSync, WindowsClipboardSync>();
+    else if (OperatingSystem.IsLinux() && !linuxConsoleMode)
+        services.AddSingleton<IClipboardSync, XorgClipboardSync>();
+    else
+        services.AddSingleton<IClipboardSync, NullClipboardSync>();
+
+    if (!RunMode.IsSessionChild)
+        services.AddHostedService<SelfUpdater>();
+
+    // file selection detector: reads selected files from Finder/Explorer for copy hotkey
+    if (OperatingSystem.IsMacOS())
+        services.AddSingleton<IFileSelectionDetector, MacFileSelectionDetector>();
+    else if (OperatingSystem.IsWindows())
+        services.AddSingleton<IFileSelectionDetector, WindowsFileSelectionDetector>();
+    else
+        services.AddSingleton<IFileSelectionDetector, NullFileSelectionDetector>();
+
+    // file transfer: dialog and drop target resolver depend on platform; service is shared master/slave
+    if (OperatingSystem.IsMacOS())
+    {
+        // macShield implements IFileTransferDialog and IOsdNotification (already registered as singleton above)
+        services.AddSingleton<IFileTransferDialog>(sp => sp.GetRequiredService<MacShieldProcess>());
+        services.AddSingleton<IOsdNotification>(sp => sp.GetRequiredService<MacShieldProcess>());
+        services.AddSingleton<IDropTargetResolver, MacDropTargetResolver>();
+    }
+    else if (OperatingSystem.IsWindows())
+    {
+        services.AddSingleton<IFileTransferDialog, WindowsProgressDialog>();
+        services.AddSingleton<IOsdNotification, WindowsOsdNotification>();
+        services.AddSingleton<IDropTargetResolver, WindowsDropTargetResolver>();
+    }
+    else
+    {
+        services.AddSingleton<IFileTransferDialog, NullFileTransferDialog>();
+        services.AddSingleton<IOsdNotification, NullOsdNotification>();
+        services.AddSingleton<IDropTargetResolver, NullDropTargetResolver>();
+    }
+    services.AddSingleton(sp => new FileTransferService(
+        sp.GetRequiredService<IFileTransferDialog>(), sp.GetRequiredService<IDropTargetResolver>(),
+        sp.GetRequiredService<ILogger<FileTransferService>>(),
+        enableFileTransfer: sp.GetRequiredService<IHydraProfile>().EnableFileTransfer));
+
+    // embedded Styx must be registered before the relay connection so it starts first
+    if (config.EmbeddedStyxServer != null)
+    {
+        services.AddSingleton(config.EmbeddedStyxServer);
+        services.AddHostedService<EmbeddedStyxServer>();
+    }
+
+    if (profile.Mode == Mode.Slave)
+        services.AddHostedService<IRelaySender, SlaveRelayConnection>();
+    else
+        services.AddHostedService<IRelaySender, MasterRelayConnection>();
+    services.AddSingleton<IActivityTracker, ActivityTracker>();
+}
+
+if (OperatingSystem.IsWindows() && RunMode.IsSessionChild)
+    services.AddHostedService<SessionChildLifetime>();
+
+var app = builder.Build();
+
+if (macShield != null)
+{
+    var shieldLog = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Shield");
+    macShield.Log = shieldLog;
+    shieldLog.LogInformation("auth={Auth} ssid={Ssid}",
+        macNetworkState!.WifiAuthStatus switch { 0 => "notDetermined", 1 => "restricted", 2 => "denied", 3 or 4 => "authorized", _ => "none" },
+        macNetworkState.Ssid ?? "(none)");
+
+    // wire shield state changes to immediate network re-check
+    macShield.OnNetworkStateChanged = () => app.Services.GetRequiredService<NetworkWatcher>().TriggerCheck();
+}
+
+// wire screen changes to condition re-check when screenCount conditions are configured
+if (HydraConfig.HasScreenCountConditions(profiles))
+{
+    var screenDetector = app.Services.GetService<IScreenDetector>();
+    if (screenDetector != null)
+    {
+        var watcher = app.Services.GetRequiredService<NetworkWatcher>();
+        screenDetector.ScreensChanged += _ => watcher.TriggerCheck();
+    }
+}
+
+app.Run();
+processLock?.Dispose();
+
+// creates the platform-specific network detector for use before DI is set up
+static async Task<INetworkDetector> CreateDetector(MacNetworkState? macNetworkState, IServiceCollection logServices)
+{
+    if (OperatingSystem.IsMacOS()) return new MacNetworkDetector(macNetworkState);
+    var cmdRunner = new CmdRunner(await logServices.CreateLogger<CmdRunner>());
+    if (OperatingSystem.IsWindows()) return new WindowsNetworkDetector();
+    if (OperatingSystem.IsLinux()) return new LinuxNetworkDetector(cmdRunner, await logServices.CreateLogger<LinuxNetworkDetector>());
+    throw new PlatformNotSupportedException($"Unsupported OS: {Environment.OSVersion}");
+}
+
+// returns the current number of connected screens
+static int GetScreenCount()
+{
+    if (OperatingSystem.IsMacOS()) return MacDisplayHelper.GetAllScreens().Count;
+    if (OperatingSystem.IsWindows()) return WindowsDisplayHelper.GetAllScreens().Count;
+    if (OperatingSystem.IsLinux())
+    {
+        var display = Hydra.Platform.Linux.NativeMethods.XOpenDisplay(null);
+        if (display == nint.Zero) return 1;
+        try
+        {
+            var root = Hydra.Platform.Linux.NativeMethods.XDefaultRootWindow(display);
+            return XorgDisplayHelper.GetAllScreens(display, root).Count;
+        }
+        finally
+        {
+            _ = Hydra.Platform.Linux.NativeMethods.XCloseDisplay(display);
+        }
+    }
+    return 1;
+}

@@ -1,0 +1,208 @@
+// Modified 2026-09-13 for the offline safety review fork; GPL-2.0. See MODIFICATIONS.md.
+using System.Diagnostics;
+using System.Formats.Tar;
+using System.IO.Compression;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text.Json;
+using Cathedral.Utils;
+using Hydra.Config;
+using Hydra.Platform;
+using Microsoft.Extensions.Logging;
+
+namespace Hydra.Update;
+
+internal sealed class SelfUpdater(IHydraProfile profile, ILogger<SelfUpdater> log) : SimpleHostedService(log, TimeSpan.FromMinutes(30))
+{
+    private const string Repo = "pacanimal/hydra";
+    private readonly Toggle _warned = new();
+    private static readonly HttpClient Http = CreateHttp();
+
+    private static HttpClient CreateHttp()
+    {
+        var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        http.DefaultRequestHeaders.UserAgent.TryParseAdd("Hydra"); // set once — GitHub requires a UA
+        return http;
+    }
+
+    // set by ServiceHost to stop the child process before a binary swap
+    internal Func<Task>? StopChild { get; set; }
+
+    // Never replace this review fork with upstream binaries, even if an old config enables updates.
+    protected override Task Execute(CancellationToken cancel)
+    {
+        if (profile.AutoUpdate && _warned.TrySet())
+            log.LogWarning("Auto-update is unavailable in the offline review build");
+        return Task.CompletedTask;
+    }
+
+    private async Task CheckAndUpdate(CancellationToken cancel)
+    {
+        var current = CurrentVersion();
+        log.LogInformation("Checking for updates (current: {Version})", current);
+
+        var json = await Http.GetStringAsync($"https://api.github.com/repos/{Repo}/releases/latest", cancel);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        var tag = root.GetProperty("tag_name").GetString() ?? "0.0.0";
+        var latest = Version.Parse(tag.TrimStart('v'));
+
+        if (latest <= current)
+        {
+            log.LogInformation("Already up to date ({Version})", current);
+            return;
+        }
+
+        log.LogInformation("Update available: {Current} → {Latest}", current, latest);
+
+        var rid = Rid();
+        if (rid == null)
+        {
+            log.LogWarning("Unsupported platform for auto-update");
+            return;
+        }
+
+        var assetName = $"hydra-{rid}.tar.gz";
+        string? downloadUrl = null;
+        foreach (var asset in root.GetProperty("assets").EnumerateArray())
+        {
+            if (asset.GetProperty("name").GetString() == assetName)
+            {
+                downloadUrl = asset.GetProperty("browser_download_url").GetString();
+                break;
+            }
+        }
+
+        if (downloadUrl == null)
+        {
+            log.LogWarning("No asset found for {Asset}", assetName);
+            return;
+        }
+
+        log.LogInformation("Downloading {Asset}", assetName);
+        await DownloadAndApply(downloadUrl, cancel);
+    }
+
+    private async Task DownloadAndApply(string url, CancellationToken cancel)
+    {
+        var exePath = Environment.ProcessPath
+            ?? throw new InvalidOperationException("cannot determine process path");
+        var appDir = Path.GetDirectoryName(exePath)
+            ?? throw new InvalidOperationException("cannot determine app directory");
+
+        var exeName = OperatingSystem.IsWindows() ? "Hydra.exe" : "Hydra";
+        var tmpPath = Path.Combine(appDir, exeName + ".tmp");
+
+        // stream: http → gzip → tar → .tmp file
+        using var downloadCancel = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        downloadCancel.CancelAfter(TimeSpan.FromMinutes(2));
+
+        using var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, downloadCancel.Token);
+        response.EnsureSuccessStatusCode();
+
+        await using var httpStream = await response.Content.ReadAsStreamAsync(downloadCancel.Token);
+        await using var gzip = new GZipStream(httpStream, CompressionMode.Decompress);
+        using var tar = new TarReader(gzip);
+
+        TarEntry? entry;
+        while ((entry = await tar.GetNextEntryAsync(cancellationToken: downloadCancel.Token)) != null)
+        {
+            if (Path.GetFileName(entry.Name) != exeName || entry.DataStream == null) continue;
+            await using var tmp = File.Create(tmpPath);
+            await entry.DataStream.CopyToAsync(tmp, downloadCancel.Token);
+            break;
+        }
+
+        if (!File.Exists(tmpPath))
+            throw new InvalidOperationException($"'{exeName}' not found in archive");
+
+        // stop child before swapping — prevents file-lock conflicts in service mode
+        if (StopChild != null)
+            await StopChild();
+
+        // atomic swap
+        if (OperatingSystem.IsWindows())
+        {
+            // Windows can't overwrite a running exe, so rename it aside then move the new one in — two
+            // non-atomic steps. Retry the second move to ride out transient AV/indexer locks on the fresh
+            // file; if it still fails, roll the old exe back so the install is never left with NO Hydra.exe.
+            File.Move(exePath, exePath + ".old");
+            try
+            {
+                for (var attempt = 0; ; attempt++)
+                {
+                    try { File.Move(tmpPath, exePath); break; }
+                    catch (IOException) when (attempt < 5) { await Task.Delay(200, cancel); }
+                }
+            }
+            catch
+            {
+                try
+                {
+                    if (!File.Exists(exePath) && File.Exists(exePath + ".old"))
+                        File.Move(exePath + ".old", exePath); // restore — never leave the install with no exe
+                }
+                catch { /* best-effort restore */ }
+                throw;
+            }
+        }
+        else
+        {
+            File.Move(tmpPath, exePath, overwrite: true);
+            var mode = File.GetUnixFileMode(exePath);
+            File.SetUnixFileMode(exePath, mode | UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute);
+
+
+        }
+
+        log.LogInformation("Update applied, restarting");
+
+        if (StopChild != null)
+        {
+            // running as service — exit non-zero so SCM failure action restarts with the new binary
+            Environment.Exit(1);
+            return;
+        }
+
+        ProcessRestart.Restart();
+    }
+
+    private static void Cleanup()
+    {
+        var appDir = Path.GetDirectoryName(Environment.ProcessPath);
+        if (appDir == null) return;
+
+        // always clear stale temp downloads
+        foreach (var file in Directory.EnumerateFiles(appDir, "*.tmp"))
+            TryDelete(file);
+
+        // only clear .old backups once the real binary is present again — never destroy the last
+        // recovery copy while Hydra.exe is missing (e.g. after an interrupted Windows swap)
+        var exeName = OperatingSystem.IsWindows() ? "Hydra.exe" : "Hydra";
+        if (File.Exists(Path.Combine(appDir, exeName)))
+            foreach (var file in Directory.EnumerateFiles(appDir, "*.old"))
+                TryDelete(file);
+    }
+
+    private static void TryDelete(string file)
+    {
+        try { File.Delete(file); }
+        catch { /* best effort */ }
+    }
+
+    private static Version CurrentVersion() =>
+        Version.Parse(Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion.Split('+')[0]  // strip build metadata suffix
+            ?? "0.0.0");
+
+    private static string? Rid()
+    {
+        if (OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.Arm64) return "osx-arm64";
+        if (OperatingSystem.IsWindows() && RuntimeInformation.ProcessArchitecture == Architecture.X64) return "win-x64";
+        if (OperatingSystem.IsLinux() && RuntimeInformation.ProcessArchitecture == Architecture.X64) return "linux-x64";
+        if (OperatingSystem.IsLinux() && RuntimeInformation.ProcessArchitecture == Architecture.Arm64) return "linux-arm64";
+        return null;
+    }
+}

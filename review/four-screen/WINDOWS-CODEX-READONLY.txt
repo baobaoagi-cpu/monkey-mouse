@@ -1,0 +1,9 @@
+給 Windows 端 Codex 的下一階段只讀指令（目前不需使用者執行）：
+
+請在 ASUS Windows 11 只讀收集兩個螢幕的 OutputName、目前 HMONITOR、螢幕矩形 X/Y/Width/Height、主顯示器標記、DPI 和縮放；確認哪塊是外接大螢幕、哪塊是 ASUS 內建。可以先執行本目錄 collect-windows-readonly.ps1，僅把 JSON 輸出回傳，不寫入配置。
+
+該腳本的 GetMonitorInfo/GetDpiForMonitor 輸出會受呼叫程序 DPI awareness 影響，請另外用 QueryDisplayConfig／DisplayConfigGetDeviceInfo 或 EnumDisplaySettingsEx 的只讀資料核對原生解析度、來源座標及顯示型號。若需要指定 DPI awareness，只允許專用採集程序或執行緒的本地 awareness，不更動 Windows 顯示設定；必須在結果註明座標空間。
+
+請根據目前 Hydra WindowsDisplayHelper/ScreenDetector 的只讀枚舉邏輯對照 SourceScreen 可以匹配的 ID。不要啟動完整 Hydra、relay 或 helper 來採集。HMONITOR 不是永久設備 ID，不能把重啟前的數字當成穩定身份。縮放未知就維持 null，不要自動假設 DPI/96 等於 Hydra MouseScale。
+
+不得安裝軟體、更新驅動、改螢幕位置/縮放、操控 ShareMouse、改權限/防火牆/系統安全、開啟同步/遠端輸入。不要收集或要求任何密碼。只輸出核對結果與未確認項目。

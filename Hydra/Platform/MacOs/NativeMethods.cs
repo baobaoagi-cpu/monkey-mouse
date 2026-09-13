@@ -1,0 +1,667 @@
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+// ReSharper disable InconsistentNaming
+
+namespace Hydra.Platform.MacOs;
+
+internal static partial class NativeMethods
+{
+    private const string CoreGraphics = "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics";
+    private const string CoreFoundation = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+    private const string ApplicationServices = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices";
+    private const string AppKit = "/System/Library/Frameworks/AppKit.framework/AppKit";
+
+    // ensure frameworks are loaded before calling into objc_getClass for their classes.
+    // NativeLibrary.Load is idempotent — safe to call from multiple constructors.
+    internal static void EnsureAppKitLoaded() => NativeLibrary.Load(AppKit);
+    internal static void EnsureApplicationServicesLoaded() => NativeLibrary.Load(ApplicationServices);
+
+    // -- event tap constants --
+
+    internal const int KCGHidEventTap = 0;
+    internal const int KCGHeadInsertEventTap = 0;
+    internal const int KCGEventTapOptionDefault = 0;
+    internal const ulong KCGEventMaskForAllEvents = ~0UL;
+    internal const int KCGEventTapDisabledByTimeout = unchecked((int)0xFFFFFFFE);
+    internal const int KCGEventTapDisabledByUserInput = unchecked((int)0xFFFFFFFD);
+    internal const int KCGEventLeftMouseDown = 1;
+    internal const int KCGEventLeftMouseUp = 2;
+    internal const int KCGEventRightMouseDown = 3;
+    internal const int KCGEventRightMouseUp = 4;
+    internal const int KCGEventMouseMoved = 5;
+    internal const int KCGEventLeftMouseDragged = 6;
+    internal const int KCGEventRightMouseDragged = 7;
+    internal const int KCGEventOtherMouseDragged = 27;
+    internal const int KCGEventScrollWheel = 22;
+    internal const int KCGEventOtherMouseDown = 25;
+    internal const int KCGEventOtherMouseUp = 26;
+
+    // CGEventField values for mouse click state, movement deltas, and button number
+    internal const int KCGMouseEventClickState = 1;
+    internal const int KCGMouseEventDeltaX = 4;
+    internal const int KCGMouseEventDeltaY = 5;
+    internal const int KCGMouseEventButtonNumber = 3;
+    internal const int KCGScrollWheelEventDeltaAxis1 = 11;        // integer line delta, vertical (positive = up)
+    internal const int KCGScrollWheelEventDeltaAxis2 = 12;        // integer line delta, horizontal (positive = right)
+    internal const int KCGScrollWheelEventFixedPtDeltaAxis1 = 93; // 16.16 fixed-point line delta, vertical
+    internal const int KCGScrollWheelEventFixedPtDeltaAxis2 = 94; // 16.16 fixed-point line delta, horizontal
+    internal const int KCGScrollWheelEventIsContinuous = 88;      // 0 = discrete mouse wheel, 1 = continuous (trackpad)
+
+    // -- CoreGraphics private APIs (CGS) --
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CGSMainConnectionID();
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CGSSetConnectionProperty(int cid, int targetCid, nint key, nint value);
+
+    // -- CoreFoundation: string + boolean --
+
+    [LibraryImport(CoreFoundation, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CFStringCreateWithCString(nint allocator, string str, uint encoding);
+
+    internal const uint KCFStringEncodingUtf8 = 0x08000100;
+
+    // convenience wrapper: creates a CFString/NSString from a managed string (toll-free bridged)
+    internal static nint MakeNsString(string s) => CFStringCreateWithCString(nint.Zero, s, KCFStringEncodingUtf8);
+
+    // -- ApplicationServices --
+
+    [LibraryImport(ApplicationServices)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool AXIsProcessTrusted();
+
+    [LibraryImport(ApplicationServices)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool AXIsProcessTrustedWithOptions(nint options);
+
+    // polls for up to ~4s using CGEventTapCreate — the reliable live check, unlike AXIsProcessTrusted()
+    // which returns a cached value for a running process and won't reflect a live grant.
+    internal static bool PollAccessibilityTrusted()
+    {
+        for (var i = 0; i < 8; i++)
+        {
+            if (CanCreateEventTap()) return true;
+            Thread.Sleep(500);
+        }
+        return false;
+    }
+
+    // opens the system accessibility prompt (System Settings), returns current trust state.
+    internal static bool ShowAccessibilityPrompt()
+    {
+        EnsureAppKitLoaded();
+        var cls = objc_getClass("NSMutableDictionary");
+        var dict = objc_msgSend_noarg(objc_msgSend_noarg(cls, sel_registerName("alloc")), sel_registerName("init"));
+        var key = MakeNsString("AXTrustedCheckOptionPrompt");
+        objc_msgSend_2arg(dict, sel_registerName("setObject:forKey:"), KCFBooleanTrue, key);
+        CFRelease(key);
+        var trusted = AXIsProcessTrustedWithOptions(dict);
+        objc_msgSend_noarg(dict, sel_registerName("release"));
+        return trusted;
+    }
+
+    internal static async Task WaitForAccessibilityTrusted(CancellationToken cancel)
+    {
+        // AXIsProcessTrusted() returns a cached value for a running process and won't update after
+        // a live grant. CGEventTapCreate() tests the actual kernel capability and is not cached —
+        // it's the reliable detection method used by production macOS accessibility tools.
+        // com.apple.accessibility.api distributed notification also doesn't fire for processes that
+        // weren't trusted at startup, so polling is the only option.
+        while (!cancel.IsCancellationRequested)
+        {
+            try { await Task.Delay(500, cancel); }
+            catch (OperationCanceledException) { return; }
+            if (CanCreateEventTap()) return;
+        }
+    }
+
+    private static bool CanCreateEventTap()
+    {
+        CGEventTapCallBack probe = (_, _, eventRef, _) => eventRef;
+        var tap = CGEventTapCreate(KCGHidEventTap, KCGHeadInsertEventTap, KCGEventTapOptionDefault,
+            KCGEventMaskForAllEvents, probe, nint.Zero);
+        if (tap == nint.Zero) return false;
+        CFRelease(tap);
+        GC.KeepAlive(probe);
+        return true;
+    }
+
+    [LibraryImport(ApplicationServices)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint AXUIElementCreateSystemWide();
+
+    [LibraryImport(ApplicationServices)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint AXUIElementCreateApplication(int pid);
+
+    // returns AXError (0 = kAXErrorSuccess); element is a CFTypeRef (caller must CFRelease)
+    [LibraryImport(ApplicationServices)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int AXUIElementCopyElementAtPosition(nint application, float x, float y, out nint element);
+
+    // returns AXError (0 = kAXErrorSuccess); value is a CFTypeRef (caller must CFRelease)
+    [LibraryImport(ApplicationServices)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int AXUIElementCopyAttributeValue(nint element, nint attribute, out nint value);
+
+    // toll-free bridged NSString/CFString → managed string
+    internal static unsafe string? CfStringToManaged(nint cfStr)
+    {
+        if (cfStr == nint.Zero) return null;
+        var charCount = objc_msgSend_long(cfStr, sel_registerName("length"));
+        var bufSize = (nint)(charCount * 4 + 1);
+        var buf = Marshal.AllocHGlobal(bufSize);
+        try
+        {
+            return CFStringGetCString(cfStr, (byte*)buf, bufSize, KCFStringEncodingUtf8)
+                ? Marshal.PtrToStringUTF8(buf) : null;
+        }
+        finally { Marshal.FreeHGlobal(buf); }
+    }
+
+    // -- CoreGraphics: display --
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial uint CGMainDisplayID();
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial CGRect CGDisplayBounds(uint display);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static unsafe partial int CGGetActiveDisplayList(uint maxDisplays, uint* activeDisplays, out uint displayCount);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CGDisplayHideCursor(uint display);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CGDisplayShowCursor(uint display);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CGAssociateMouseAndMouseCursorPosition([MarshalAs(UnmanagedType.Bool)] bool connected);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool CGCursorIsVisible();
+
+    // -- CoreGraphics: cursor --
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CGWarpMouseCursorPosition(CGPoint point);
+
+    // setting near-zero prevents CGWarpMouseCursorPosition from resetting the acceleration curve
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void CGSetLocalEventsSuppressionInterval(double seconds);
+
+    // -- CoreGraphics: keyboard event types and fields --
+
+    internal const int KCGEventKeyDown = 10;
+    internal const int KCGEventKeyUp = 11;
+    internal const int KCGEventFlagsChanged = 12;
+
+    internal const int KCGKeyboardEventKeycode = 9;
+    internal const int KCGKeyboardEventAutorepeat = 8;  // 1 on OS auto-repeat key-down events
+
+    // CGEventFlags modifier mask bits
+    internal const ulong KCGEventFlagMaskAlphaShift = 0x00010000; // caps lock
+    internal const ulong KCGEventFlagMaskShift = 0x00020000;
+    internal const ulong KCGEventFlagMaskControl = 0x00040000;
+    internal const ulong KCGEventFlagMaskAlternate = 0x00080000; // option/alt
+    internal const ulong KCGEventFlagMaskCommand = 0x00100000;
+    internal const ulong KCGEventFlagMaskNumericPad = 0x00200000;
+    internal const ulong KCGEventFlagMaskSecondaryFn = 0x00800000; // fn/function key flag
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial ulong CGEventGetFlags(nint eventRef);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void CGEventSetFlags(nint eventRef, ulong flags);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void CGEventSetType(nint eventRef, int eventType);
+
+    // kCGEventSourceStateCombinedSessionState = 0: posted events update the session-level modifier
+    // tracking, which is what [NSEvent modifierFlags] (class method) reads.
+    internal const int KCGEventSourceStateCombinedSessionState = 0;
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CGEventSourceCreate(int stateID);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial ulong CGEventSourceFlagsState(int stateID);
+
+    // -- CoreGraphics: event creation and injection --
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CGEventCreateKeyboardEvent(nint source, ushort virtualKey, [MarshalAs(UnmanagedType.Bool)] bool keyDown);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CGEventCreateMouseEvent(nint source, int mouseType, CGPoint mouseCursorPosition, int mouseButton);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CGEventCreateScrollWheelEvent(nint source, int units, uint wheelCount, int wheel1, int wheel2);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void CGEventPost(int tap, nint eventRef);
+
+    // create a blank event (used to query current cursor position before relative move)
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CGEventCreate(nint source);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void CGEventSetIntegerValueField(nint eventRef, int field, long value);
+
+    // set double delta field — required for some 3D apps that read CGEventGetDoubleValueField (barrier/deskflow comment)
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void CGEventSetDoubleValueField(nint eventRef, int field, double value);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static unsafe partial void CGEventKeyboardSetUnicodeString(nint eventRef, nuint stringLength, ushort* unicodeString);
+
+    // -- CoreGraphics: events (read) --
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial long CGEventGetIntegerValueField(nint eventRef, int field);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CGEventTapCreate(
+        int tap, int place, int options,
+        ulong eventsOfInterest,
+        CGEventTapCallBack callback,
+        nint userInfo);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial CGPoint CGEventGetLocation(nint eventRef);
+
+    [LibraryImport(CoreGraphics)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void CGEventTapEnable(nint tap, [MarshalAs(UnmanagedType.Bool)] bool enable);
+
+    // -- CoreFoundation: run loop --
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CFMachPortCreateRunLoopSource(nint allocator, nint port, nint order);
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CFRunLoopGetCurrent();
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void CFRunLoopAddSource(nint rl, nint source, nint mode);
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void CFRunLoopRun();
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void CFRunLoopStop(nint rl);
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void CFRelease(nint cf);
+
+    private static readonly nint KCFBooleanTrue = Marshal.ReadIntPtr(
+        NativeLibrary.GetExport(NativeLibrary.Load(CoreFoundation), "kCFBooleanTrue"));
+
+    // allow cursor manipulation from a background thread (private CGS API — matches synergy)
+    internal static void EnableBackgroundCursorManipulation()
+    {
+        var cid = CGSMainConnectionID();
+        var key = MakeNsString("SetsCursorInBackground");
+        _ = CGSSetConnectionProperty(cid, cid, key, KCFBooleanTrue);
+        CFRelease(key);
+    }
+
+    // -- CoreFoundation: data --
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CFDataGetBytePtr(nint theData);
+
+    // -- Carbon: text input sources --
+
+    private const string Carbon = "/System/Library/Frameworks/Carbon.framework/Carbon";
+
+    [LibraryImport(Carbon)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint TISCopyCurrentKeyboardLayoutInputSource();
+
+    // the Latin-capable layout macOS keeps alongside a non-Latin one, for resolving shortcut chars
+    [LibraryImport(Carbon)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
+
+    [LibraryImport(Carbon)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint TISGetInputSourceProperty(nint inputSource, nint propertyKey);
+
+    // -- Carbon: UCKeyTranslate --
+
+    // kUCKeyAction values
+    internal const ushort KUCKeyActionDown = 0;
+
+    [LibraryImport(Carbon)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static unsafe partial int UCKeyTranslate(
+        nint keyLayoutPtr,
+        ushort virtualKeyCode,
+        ushort keyAction,
+        uint modifierKeyState,
+        uint keyboardType,
+        uint keyTranslateOptions,
+        ref uint deadKeyState,
+        nuint maxStringLength,
+        out nuint actualStringLength,
+        ushort* unicodeString);
+
+    // -- Carbon: keyboard type --
+
+    [LibraryImport(Carbon)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial byte LMGetKbdType();
+
+    // -- Objective-C runtime (used for NX_SYSDEFINED media key decoding and injection) --
+
+    private const string ObjC = "/usr/lib/libobjc.A.dylib";
+
+    [LibraryImport(ObjC, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint objc_getClass(string name);
+
+    [LibraryImport(ObjC, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint sel_registerName(string str);
+
+    // receiver + selector → nint (no arguments, returns object)
+    [LibraryImport(ObjC, EntryPoint = "objc_msgSend")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint objc_msgSend_noarg(nint obj, nint sel);
+
+    // receiver + selector + one nint argument → nint (used for class method calls with one arg)
+    [LibraryImport(ObjC)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint objc_msgSend(nint obj, nint sel, nint arg);
+
+    // receiver + selector + nuint index → nint (for NSArray objectAtIndex:)
+    [LibraryImport(ObjC, EntryPoint = "objc_msgSend")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint objc_msgSend_nuint(nint obj, nint sel, nuint arg);
+
+    // receiver + selector → long (used for NSInteger return values)
+    [LibraryImport(ObjC, EntryPoint = "objc_msgSend")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial long objc_msgSend_long(nint obj, nint sel);
+
+    // receiver + selector → uint (for NSNumber unsignedIntValue)
+    [LibraryImport(ObjC, EntryPoint = "objc_msgSend")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial uint objc_msgSend_uint(nint obj, nint sel);
+
+    // receiver + selector → double (for NSTimeInterval return values like keyRepeatDelay)
+    [LibraryImport(ObjC, EntryPoint = "objc_msgSend")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial double objc_msgSend_double(nint obj, nint sel);
+
+    // receiver + selector + two nint args → nint (used for NSPasteboard setString:forType: and setData:forType:)
+    [LibraryImport(ObjC, EntryPoint = "objc_msgSend")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint objc_msgSend_2arg(nint obj, nint sel, nint arg1, nint arg2);
+
+    // receiver + selector + pointer + nuint → nint (used for [NSData dataWithBytes:length:])
+    [LibraryImport(ObjC, EntryPoint = "objc_msgSend")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static unsafe partial nint objc_msgSend_ptr_nuint(nint obj, nint sel, void* ptr, nuint length);
+
+    // [NSEvent otherEventWithType:location:modifierFlags:timestamp:windowNumber:context:subtype:data1:data2:]
+    // used to inject NX_SYSDEFINED media key events (volume, brightness, eject, play/next/prev).
+    // CGPoint doubles go into fp registers per arm64 AAPCS HFA rules.
+    [LibraryImport(ObjC, EntryPoint = "objc_msgSend")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint objc_msgSend_NSEvent_otherEvent(
+        nint cls, nint sel,
+        ulong type,
+        CGPoint location,
+        ulong modifierFlags,
+        double timestamp,
+        nint windowNumber,
+        nint context,
+        short subtype,
+        nint data1,
+        nint data2);
+
+    [LibraryImport(CoreFoundation, EntryPoint = "CFStringGetCString")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static unsafe partial bool CFStringGetCString(nint theString, byte* buffer, nint bufferSize, uint encoding);
+
+    // NX_SYSDEFINED event type constant (NSSystemDefined, subtype 8 = media key)
+    internal const int KNXSysDefined = 14;
+
+    // NX_KEYTYPE_* constants (from IOKit/hidsystem/ev_keymap.h)
+    internal const uint NXKeytypeSoundUp = 0;
+    internal const uint NXKeytypeSoundDown = 1;
+    internal const uint NXKeytypeBrightnessUp = 2;
+    internal const uint NXKeytypeBrightnessDown = 3;
+    internal const uint NXKeytypeMute = 7;
+    internal const uint NXKeytypeEject = 14;
+    internal const uint NXKeytypePlay = 16;
+    internal const uint NXKeytypeNext = 17;
+    internal const uint NXKeytypePrevious = 18;
+    internal const uint NXKeytypeFast = 19;
+    internal const uint NXKeytypeRewind = 20;
+
+    // -- IOKit: HID system event injection (deskflow/barrier approach) --
+    // IOHIDPostEvent posts events at the IOKit HID driver level, below CoreGraphics.
+    // This updates the system-wide modifier state read by [NSEvent modifierFlags] class method,
+    // which CGEventPost alone does not do. Deprecated since macOS 11 but still functional.
+
+    private const string IOKit = "/System/Library/Frameworks/IOKit.framework/IOKit";
+
+    // NX event types (IOLLEvent.h) — same numeric values as the CG equivalents
+    internal const uint NxKeyDown = 10;
+    internal const uint NxKeyUp = 11;
+    internal const uint NxFlagsChanged = 12;
+
+    // kNXEventDataVersion (IOLLEvent.h)
+    internal const uint KNxEventDataVersion = 2;
+
+    // kIOHIDParamConnectType (IOHIDShared.h) — connection type for IOServiceOpen
+    internal const uint KIoHidParamConnectType = 1;
+
+    // device-dependent modifier masks (IOLLEvent.h) — combined with generic CGEventFlag masks
+    internal const uint NxDeviceLCmdKeyMask = 0x00000008;
+    internal const uint NxDeviceRCmdKeyMask = 0x00000010;
+    internal const uint NxDeviceLShiftKeyMask = 0x00000002;
+    internal const uint NxDeviceRShiftKeyMask = 0x00000004;
+    internal const uint NxDeviceLCtlKeyMask = 0x00000001;
+    internal const uint NxDeviceRCtlKeyMask = 0x00002000;
+    internal const uint NxDeviceLAltKeyMask = 0x00000020;
+    internal const uint NxDeviceRAltKeyMask = 0x00000040;
+
+    [LibraryImport(IOKit)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int IOMasterPort(uint bootstrapPort, out uint masterPort);
+
+    [LibraryImport(IOKit, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint IOServiceMatching(string name);
+
+    [LibraryImport(IOKit)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int IOServiceGetMatchingServices(uint masterPort, nint matching, out uint iterator);
+
+    [LibraryImport(IOKit)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial uint IOIteratorNext(uint iterator);
+
+    [LibraryImport(IOKit)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int IOServiceOpen(uint service, uint owningTask, uint type, out uint connect);
+
+    [LibraryImport(IOKit)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int IOObjectRelease(uint obj);
+
+    [LibraryImport(IOKit)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int IOHIDPostEvent(uint connect, uint eventType, IOGPoint location, in NXEventData eventData, uint eventDataVersion, uint eventFlags, uint options);
+
+    // -- IOKit: IORegistry (screen lock detection) --
+
+    // kIOMasterPortDefault = 0 (MACH_PORT_NULL); kIOMainPortDefault on macOS 12+, same value
+    [LibraryImport(IOKit)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial uint IORegistryGetRootEntry(uint masterPort);
+
+    // returns CFTypeRef (caller owns; must CFRelease); returns 0 on failure
+    [LibraryImport(IOKit)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint IORegistryEntryCreateCFProperty(uint entry, nint key, nint allocator, uint options);
+
+    internal const uint KIOPMUserActiveLocal = 0;
+
+    [LibraryImport(IOKit)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int IOPMAssertionDeclareUserActivity(nint assertionName, uint userType, out uint assertionID);
+
+    // -- IOKit: power sources (AC/battery state) --
+
+    [LibraryImport(IOKit)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint IOPSCopyPowerSourcesInfo();
+
+    [LibraryImport(IOKit)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint IOPSGetProvidingPowerSourceType(nint snapshot);
+
+    // -- SystemConfiguration: dynamic store (SSID detection without Location Services) --
+
+    private const string SystemConfiguration = "/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration";
+
+    [LibraryImport(SystemConfiguration)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint SCDynamicStoreCreate(nint allocator, nint name, nint callout, nint context);
+
+    [LibraryImport(SystemConfiguration)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint SCDynamicStoreCopyValue(nint store, nint key);
+
+    // -- CoreFoundation: array --
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CFArrayGetCount(nint theArray);
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CFArrayGetValueAtIndex(nint theArray, nint idx);
+
+    // -- CoreFoundation: boolean --
+
+    // returns unsigned char (Boolean); use != 0 to get a managed bool
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial byte CFBooleanGetValue(nint boolean);
+
+    // -- CoreFoundation: dictionary --
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CFDictionaryGetValue(nint dict, nint key);
+
+    // -- CoreFoundation: data (length) --
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CFDataGetLength(nint theData);
+
+    // -- CoreFoundation: distributed notification center --
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial nint CFNotificationCenterGetDistributedCenter();
+
+    // suspensionBehavior: CFNotificationSuspensionBehaviorDeliverImmediately = 4
+    internal const int CFNotificationSuspensionBehaviorDeliverImmediately = 4;
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void CFNotificationCenterAddObserver(
+        nint center, nint observer, CFNotificationCallback callBack,
+        nint name, nint obj, int suspensionBehavior);
+
+    [LibraryImport(CoreFoundation)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial void CFNotificationCenterRemoveObserver(nint center, nint observer, nint name, nint obj);
+
+}
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate nint CGEventTapCallBack(nint proxy, int type, nint eventRef, nint userInfo);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void CFNotificationCallback(nint center, nint observer, nint name, nint obj, nint userInfo);
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct CGPoint
+{
+    internal double X;
+    internal double Y;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct CGRect
+{
+    internal CGPoint Origin;
+    internal CGPoint Size;
+}
+
+// IOGPoint: cursor location passed to IOHIDPostEvent — verified sizeof=4 via SDK header
+[StructLayout(LayoutKind.Sequential)]
+internal struct IOGPoint
+{
+    internal short X;
+    internal short Y;
+}
+
+// NXEventData: union from IOLLEvent.h — verified sizeof=48, keyCode at offset 8 via SDK header
+[StructLayout(LayoutKind.Explicit, Size = 48)]
+internal struct NXEventData
+{
+    [FieldOffset(8)]
+    internal ushort KeyCode;
+}
+
