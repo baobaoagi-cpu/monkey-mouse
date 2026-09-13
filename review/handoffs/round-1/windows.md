@@ -1,5 +1,31 @@
 # Round 1 / ASUS
 
+## 2026-09-13 已批准的 Windows 建置與離線驗證（最新結果）
+
+本節優先於下方歷史紀錄。使用者明確批准「Windows 建置與離線測試」，涵蓋 locked NuGet restore、review tools 編譯、指定回歸／靜態檢查及唯讀 displays --host ASUS。本次輸入及父提交為 287b71136df4994c39d183d0fcb83bfbed653815；產品程式基準仍為 6958594d61217aa47a61fe11649e3570283180fb。這是授權範圍內的 Windows 前置建置驗證，不代表雙端第一輪已結案或第二輪候選版已完成。
+
+**目前 BLOCKED 的原因已從授權缺項改成實際建置問題。既有本次建置／離線測試授權有效，不需讓使用者為相同範圍重複批准。**
+
+| Case | 主機／時間（+08:00） | 實際命令／步驟 | 結果 | 狀態／證據 |
+| --- | --- | --- | --- | --- |
+| W-B01 | ASUS；2026-09-13 15:53–15:55 | SDK 10.0.401；bash review/test.sh，由本地 wrapper 指定既有 SDK/Python，restore 加 --configfile local-only/nuget-approved.config | config 清除繼承來源，只含 https://api.nuget.org/v3/index.json；locked-mode 保留；CLI、套件和 HTTP cache 本地隔離 | PASS（前置配置）；local-only/run-approved-tests.sh、nuget-approved.config |
+| W-B02 | ASUS；同上 | dotnet restore MonkeyMouse.Tools/MonkeyMouse.Tools.csproj -p:SkipMacShield=true --locked-mode --configfile local-only/nuget-approved.config | exit 1，NU1004：Hydra 的鎖定 RID 是 osx-arm64，Windows 專案推導 win-x64。其餘部分專案已還原，腳本隨錯誤停止 | FAIL；local-only/windows-approved-tests.log |
+| W-B03 | ASUS；同上 | 腳本後續 build、Tests restore/test | 首次工具 restore 失敗，後續未執行；沒有 Windows 測試通過數可報 | NOT_RUN；同上 |
+| W-B04 | ASUS；2026-09-13 15:55 | 既有 Python -I -B review/check_source.py | 初次遇 Windows cp950 解碼錯誤；保留初次日誌 | FAIL（初次）；local-only/windows-static-checks-first-attempt.log |
+| W-B05 | ASUS；2026-09-13 15:55 | 既有 Python -I -B -X utf8 review/check_source.py | exit 0，14 項皆 true；只改本次 Python 程序的解碼模式，沒有修改系統語系或來源 | PASS；local-only/windows-static-checks.log |
+| W-B06 | ASUS；同上 | displays --host ASUS | 沒有成功建置及可核對的產物，因此未執行；先前 OS 雙屏採集仍可用，不能替代引擎驗證 | NOT_RUN |
+| W-B07 | ASUS；同上 | git diff --exit-code -- **/packages.lock.json；git status；git check-ignore | 產品及 lockfile 未改；原始結果、執行 wrapper、快取均受 ignore 保護 | PASS；local-only/windows-build-validation.json |
+
+### 根因與具體修正交接
+
+1. Hydra/Hydra.csproj 設定 PublishSingleFile=true。已讀 SDK 10.0.401 的 Microsoft.NET.RuntimeIdentifierInference.targets：此設定使 restore 推導本機 PublishRuntimeIdentifier 並加入 RuntimeIdentifiers。Windows 推導 win-x64；Hydra/packages.lock.json 只有 net10.0 與 net10.0/osx-arm64，於 locked restore 被 NU1004 擋下。這不是 Windows 權限、網路或 SDK 缺失。
+2. **Mac 整合負責人**：請修正並交付跨平台的 locked restore 策略，例如明確納入 win-x64 與 osx-arm64 的鎖定資產，並對照原有各套件版本及 contentHash，避免意外升級；或設計獨立的可攜 review build 設定與相符鎖定檔。這是待審修正方案，Windows 本次未解除 locked-mode、未 force-evaluate，也未假冒 Mac RID 趕過建置。
+3. review/check_source.py 使用預設 read_text() 編碼；Windows cp950 會失敗。已驗證本機使用 Python -X utf8 可通過。後續共用腳本可明確使用 UTF-8；本次未修改共用檔。
+4. **Windows 下一步**：讀取修正的確切 SHA、核對差異後，在本次已批准範圍內重跑建置／離線測試及唯讀 displays。若新增 socket、native-store、正式配對或輸入控制，仍不在本次批准內。
+
+本次沒有啟動 KVM 控制器、relay/LAN listener、native-store 自測或正式身份；未碰 ShareMouse、密碼、加密、權限、防火牆、Registry 或重啟。14 項靜態 PASS 不等於 managed 回歸、Windows 二進位或四屏控制 PASS。公開僅此報告，原始路徑／日誌留本機。
+
+
 ## 2026-09-13 Windows 獨立準備更新（最新狀態）
 
 本節優先於下方歷史紀錄。父提交 a38de69209938dc5fd2864f2e87e53efd01c6cc3；程式基準仍為 6958594d61217aa47a61fe11649e3570283180fb。本次只有文件變更；Round 1 仍為 **BLOCKED**，未進入第二輪。使用者要求 Windows 先獨立完成能做的準備，本次執行既有工具版本查詢與唯讀 OS 顯示採集。
